@@ -1,0 +1,6 @@
+@SMSCapture_HostAddress = http://localhost:5236
+
+GET {{SMSCapture_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

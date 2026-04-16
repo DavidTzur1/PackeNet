@@ -20,6 +20,10 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "CapturingAndParsingPackets"
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "ConstructingPackets", "Examples\ConstructingPackets\ConstructingPackets.csproj", "{22E0B713-62B3-444D-9272-AA000D04D7DE}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ReadPacketsFromFile", "ReadPacketsFromFile\ReadPacketsFromFile.csproj", "{0ED1188B-F850-42A1-BC03-A609BF39F380}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SMSCapture", "SMSCapture\SMSCapture.csproj", "{999E17B5-31F0-4A70-8AAB-C121A1E9C836}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -42,6 +46,14 @@ Global
 		{22E0B713-62B3-444D-9272-AA000D04D7DE}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{22E0B713-62B3-444D-9272-AA000D04D7DE}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{22E0B713-62B3-444D-9272-AA000D04D7DE}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0ED1188B-F850-42A1-BC03-A609BF39F380}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0ED1188B-F850-42A1-BC03-A609BF39F380}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0ED1188B-F850-42A1-BC03-A609BF39F380}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0ED1188B-F850-42A1-BC03-A609BF39F380}.Release|Any CPU.Build.0 = Release|Any CPU
+		{999E17B5-31F0-4A70-8AAB-C121A1E9C836}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{999E17B5-31F0-4A70-8AAB-C121A1E9C836}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{999E17B5-31F0-4A70-8AAB-C121A1E9C836}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{999E17B5-31F0-4A70-8AAB-C121A1E9C836}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
