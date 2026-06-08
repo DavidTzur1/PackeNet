@@ -2,19 +2,20 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PacketDotNet;
+using PacketDotNet.SMS;
 using SharpPcap;
 using SharpPcap.LibPcap;
 using System;
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+
 namespace SMSCapture
 {
-    
-
     public sealed class CaptureWorker : BackgroundService
     {
         private readonly ILogger<CaptureWorker> _logger;
@@ -46,21 +47,22 @@ namespace SMSCapture
         private DateTime _lastHeartbeatUtc = DateTime.MinValue;
 
         private static readonly TimeSpan StatsWarmup = TimeSpan.FromSeconds(10);
-        private static readonly TimeSpan StatsInterval = TimeSpan.FromSeconds(2);
-        private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(30);
+        private static readonly TimeSpan StatsInterval = TimeSpan.FromSeconds(60);
+        private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(120);
 
         private static readonly int[] CandidateCaptureBufferSizes =
         {
-        64 * 1024 * 1024,
-        32 * 1024 * 1024,
-        16 * 1024 * 1024,
-         8 * 1024 * 1024
-    };
+            64 * 1024 * 1024,
+            32 * 1024 * 1024,
+            16 * 1024 * 1024,
+             8 * 1024 * 1024
+        };
 
         private sealed class CapturedItem
         {
             public LinkLayers LinkLayerType;
             public byte[] Data = Array.Empty<byte>();
+            public int Length;
         }
 
         public CaptureWorker(
@@ -73,6 +75,8 @@ namespace SMSCapture
             _queue = new BlockingCollection<CapturedItem>(
                 new ConcurrentQueue<CapturedItem>(),
                 _options.QueueCapacity);
+
+            SmsLog.Logger = logger;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -267,7 +271,10 @@ namespace SMSCapture
                     {
                         Interlocked.Increment(ref _dequeuedPackets);
 
-                        var packet = Packet.ParsePacket(item.LinkLayerType, item.Data);
+                        var exact = new byte[item.Length];
+                        Buffer.BlockCopy(item.Data, 0, exact, 0, item.Length);
+
+                        var packet = Packet.ParsePacket(item.LinkLayerType, exact);
                         if (packet != null)
                         {
                             var sw = Stopwatch.StartNew();
@@ -288,6 +295,17 @@ namespace SMSCapture
                         Interlocked.Increment(ref _workerErrors);
                         _logger.LogError(ex, "Worker packet processing failed");
                     }
+                    finally
+                    {
+                        try
+                        {
+                            if (item.Data != null && item.Data.Length > 0)
+                                ArrayPool<byte>.Shared.Return(item.Data);
+                        }
+                        catch
+                        {
+                        }
+                    }
                 }
             });
 
@@ -304,13 +322,14 @@ namespace SMSCapture
                 if (raw?.Data == null || raw.Data.Length == 0)
                     return;
 
-                byte[] copy = new byte[raw.Data.Length];
-                Buffer.BlockCopy(raw.Data, 0, copy, 0, raw.Data.Length);
+                byte[] rented = ArrayPool<byte>.Shared.Rent(raw.Data.Length);
+                Buffer.BlockCopy(raw.Data, 0, rented, 0, raw.Data.Length);
 
                 var item = new CapturedItem
                 {
                     LinkLayerType = raw.LinkLayerType,
-                    Data = copy
+                    Data = rented,
+                    Length = raw.Data.Length
                 };
 
                 if (_queue.TryAdd(item))
@@ -319,6 +338,7 @@ namespace SMSCapture
                 }
                 else
                 {
+                    ArrayPool<byte>.Shared.Return(rented);
                     Interlocked.Increment(ref _queueFullDrops);
                 }
             }
@@ -456,7 +476,7 @@ namespace SMSCapture
 
             string lossSource = BuildLossSource(dDrop, dIfDrop, dQdrop, dWerr, dCerr);
 
-            bool interesting =
+            bool hasLossOrError =
                 dDrop > 0 ||
                 dIfDrop > 0 ||
                 dQdrop > 0 ||
@@ -465,23 +485,30 @@ namespace SMSCapture
 
             bool heartbeat = DateTime.UtcNow - _lastHeartbeatUtc >= HeartbeatInterval;
 
-            if (interesting || heartbeat)
+            if (!hasLossOrError && !heartbeat)
             {
-                var proc = Process.GetCurrentProcess();
-
-                long wsMb = proc.WorkingSet64 / (1024 * 1024);
-                long privateMb = proc.PrivateMemorySize64 / (1024 * 1024);
-                long managedMb = GC.GetTotalMemory(false) / (1024 * 1024);
-
-                if (dDrop > 5 || _queue.Count > 500 || heartbeat)
-                {
-                    _logger.LogInformation(
-                        "DELTA | Recv+={RecvDelta} | PcapDrop+={PcapDropDelta} | IfDrop+={IfDropDelta} | Enq+={EnqDelta} | Deq+={DeqDelta} | QueueCount={QueueCount} | QueueOwnDrop+={QueueOwnDropDelta} | WorkerErr+={WorkerErrDelta} | CallbackErr+={CallbackErrDelta} | WS_MB={WorkingSetMb} | Private_MB={PrivateMb} | Managed_MB={ManagedMb} | LossSource={LossSource}",
-                        dRecv, dDrop, dIfDrop, dEnq, dDeq, _queue.Count, dQdrop, dWerr, dCerr, wsMb, privateMb, managedMb, lossSource);
-                }
-
-                _lastHeartbeatUtc = DateTime.UtcNow;
+                _lastReceived = recv;
+                _lastDropped = drop;
+                _lastInterfaceDropped = ifDrop;
+                _lastEnqueued = enq;
+                _lastDequeued = deq;
+                _lastQueueFullDrops = qdrop;
+                _lastWorkerErrors = werr;
+                _lastCallbackErrors = cerr;
+                return;
             }
+
+            var proc = Process.GetCurrentProcess();
+
+            long wsMb = proc.WorkingSet64 / (1024 * 1024);
+            long privateMb = proc.PrivateMemorySize64 / (1024 * 1024);
+            long managedMb = GC.GetTotalMemory(false) / (1024 * 1024);
+
+            _logger.LogInformation(
+                "DELTA | Recv+={Recv} | PcapDrop+={PcapDrop} | IfDrop+={IfDrop} | Enq+={Enq} | Deq+={Deq} | QueueCount={QueueCount} | QueueOwnDrop+={QueueOwnDrop} | WorkerErr+={WorkerErr} | CallbackErr+={CallbackErr} | WS_MB={WsMb} | Private_MB={PrivateMb} | Managed_MB={ManagedMb} | LossSource={LossSource}",
+                dRecv, dDrop, dIfDrop, dEnq, dDeq, _queue.Count, dQdrop, dWerr, dCerr, wsMb, privateMb, managedMb, lossSource);
+
+            _lastHeartbeatUtc = DateTime.UtcNow;
 
             try
             {
@@ -567,18 +594,6 @@ namespace SMSCapture
 
             try
             {
-                if (_device != null)
-                {
-                    _device.OnPacketArrival -= Device_OnPacketArrival;
-                    _device.StopCapture();
-                }
-            }
-            catch
-            {
-            }
-
-            try
-            {
                 _device?.Close();
             }
             catch
@@ -624,14 +639,12 @@ namespace SMSCapture
             if (stats != null)
             {
                 _logger.LogInformation(
-                    "FINAL-STATS | PCAP | Received={Received} | Dropped={Dropped} | InterfaceDropped={InterfaceDropped}",
-                    stats.ReceivedPackets,
-                    stats.DroppedPackets,
-                    stats.InterfaceDroppedPackets);
+                    "FINAL-PCAP | Received={Received} | Dropped={Dropped} | InterfaceDropped={InterfaceDropped}",
+                    stats.ReceivedPackets, stats.DroppedPackets, stats.InterfaceDroppedPackets);
             }
 
             _logger.LogInformation(
-                "FINAL-STATS | APP | Enqueued={Enqueued} | Dequeued={Dequeued} | QueueCount={QueueCount} | QueueOwnDrop={QueueOwnDrop} | WorkerErr={WorkerErr} | CallbackErr={CallbackErr}",
+                "FINAL-APP | Enqueued={Enqueued} | Dequeued={Dequeued} | QueueCount={QueueCount} | QueueOwnDrop={QueueOwnDrop} | WorkerErr={WorkerErr} | CallbackErr={CallbackErr}",
                 enq, deq, _queue.Count, qdrop, werr, cerr);
         }
 
@@ -644,23 +657,8 @@ namespace SMSCapture
             long cerr = Interlocked.Read(ref _callbackErrors);
 
             _logger.LogInformation(
-                "FINAL-APP-STATS | Enqueued={Enqueued} | Dequeued={Dequeued} | QueueCount={QueueCount} | QueueOwnDrop={QueueOwnDrop} | WorkerErr={WorkerErr} | CallbackErr={CallbackErr}",
+                "FINAL-APP | Enqueued={Enqueued} | Dequeued={Dequeued} | QueueCount={QueueCount} | QueueOwnDrop={QueueOwnDrop} | WorkerErr={WorkerErr} | CallbackErr={CallbackErr}",
                 enq, deq, _queue.Count, qdrop, werr, cerr);
         }
-    }
-
-    public sealed class CaptureOptions
-    {
-        public int DeviceIndex { get; set; } = 0;
-        public bool UseFileMode { get; set; } = false;
-        public string CaptureFile { get; set; } = @"d:\test8.pcapng";
-        public string ImsiFilePath { get; set; } = @"C:\imsi.txt";
-        public int QueueCapacity { get; set; } = 50000;
-        public int LiveReadTimeoutMs { get; set; } = 1000;
-
-        public string BpfFilter { get; set; } =
-            "sctp and port 3907 and " +
-            "((src net 10.95.137.0/24 and (dst net 10.95.41.0/24 or dst net 10.95.42.0/23)) or " +
-            " (dst net 10.95.137.0/24 and (src net 10.95.41.0/24 or src net 10.95.42.0/23)))";
     }
 }

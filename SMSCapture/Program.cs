@@ -3,11 +3,10 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Serilog;
 using SMSCapture;
-//
+using PacketDotNet.SMS;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Serilog
 Log.Logger = new LoggerConfiguration()
     .ReadFrom.Configuration(builder.Configuration)
     .Enrich.FromLogContext()
@@ -15,23 +14,28 @@ Log.Logger = new LoggerConfiguration()
 
 builder.Host.UseSerilog();
 
-// Swagger
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-// App services
 builder.Services.Configure<CaptureOptions>(
     builder.Configuration.GetSection("Capture"));
 
+// SOAP HTTP client
+builder.Services.AddHttpClient("SmsSoap", client =>
+{
+    client.BaseAddress = new Uri(builder.Configuration["Soap:BaseUrl"]!);
+    client.Timeout = TimeSpan.FromSeconds(15);
+});
+
+// background services
 builder.Services.AddHostedService<CaptureWorker>();
+builder.Services.AddHostedService<SmsSoapSender>();
 
 var app = builder.Build();
 
-// Swagger
 app.UseSwagger();
 app.UseSwaggerUI();
 
-// Simple endpoints
 app.MapGet("/", () => Results.Ok("SMS capture worker is running"));
 
 app.MapGet("/health", () => Results.Ok(new

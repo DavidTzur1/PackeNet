@@ -2,6 +2,7 @@
 using SharpPcap;
 using SharpPcap.LibPcap;
 using System;
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Reflection;
 using System.Text;
@@ -37,8 +38,8 @@ class Program
     private static DateTime _lastHeartbeatUtc = DateTime.MinValue;
 
     private static readonly TimeSpan StatsWarmup = TimeSpan.FromSeconds(10);
-    private static readonly TimeSpan StatsInterval = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan StatsInterval = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(120);
 
     private const int LiveReadTimeoutMs = 1000;
 
@@ -54,6 +55,7 @@ class Program
     {
         public LinkLayers LinkLayerType;
         public byte[] Data = Array.Empty<byte>();
+        public int Length;
     }
 
     static void Main(string[] args)
@@ -268,7 +270,10 @@ class Program
                 {
                     Interlocked.Increment(ref _dequeuedPackets);
 
-                    var packet = Packet.ParsePacket(item.LinkLayerType, item.Data);
+                    var exact = new byte[item.Length];
+                    Buffer.BlockCopy(item.Data, 0, exact, 0, item.Length);
+
+                    var packet = Packet.ParsePacket(item.LinkLayerType, exact);
                     if (packet != null)
                     {
                         var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -285,6 +290,17 @@ class Program
                 catch
                 {
                     Interlocked.Increment(ref _workerErrors);
+                }
+                finally
+                {
+                    try
+                    {
+                        if (item.Data != null && item.Data.Length > 0)
+                            ArrayPool<byte>.Shared.Return(item.Data);
+                    }
+                    catch
+                    {
+                    }
                 }
             }
         });
@@ -308,13 +324,14 @@ class Program
             if (raw?.Data == null || raw.Data.Length == 0)
                 return;
 
-            byte[] copy = new byte[raw.Data.Length];
-            Buffer.BlockCopy(raw.Data, 0, copy, 0, raw.Data.Length);
+            byte[] rented = ArrayPool<byte>.Shared.Rent(raw.Data.Length);
+            Buffer.BlockCopy(raw.Data, 0, rented, 0, raw.Data.Length);
 
             var item = new CapturedItem
             {
                 LinkLayerType = raw.LinkLayerType,
-                Data = copy
+                Data = rented,
+                Length = raw.Data.Length
             };
 
             if (_queue.TryAdd(item))
@@ -323,6 +340,7 @@ class Program
             }
             else
             {
+                ArrayPool<byte>.Shared.Return(rented);
                 Interlocked.Increment(ref _queueFullDrops);
             }
         }
@@ -461,7 +479,7 @@ class Program
 
         string lossSource = BuildLossSource(dDrop, dIfDrop, dQdrop, dWerr, dCerr);
 
-        bool interesting =
+        bool hasLossOrError =
             dDrop > 0 ||
             dIfDrop > 0 ||
             dQdrop > 0 ||
@@ -470,36 +488,42 @@ class Program
 
         bool heartbeat = DateTime.UtcNow - _lastHeartbeatUtc >= HeartbeatInterval;
 
-        if (interesting || heartbeat)
+        if (!hasLossOrError && !heartbeat)
         {
-            var proc = System.Diagnostics.Process.GetCurrentProcess();
-
-            long wsMb = proc.WorkingSet64 / (1024 * 1024);
-            long privateMb = proc.PrivateMemorySize64 / (1024 * 1024);
-            long managedMb = GC.GetTotalMemory(false) / (1024 * 1024);
-
-            if (dDrop > 5 || _queue.Count > 500)
-            {
-
-                Console.WriteLine(
-                    $"DELTA | " +
-                    $"Recv+={dRecv} | " +
-                    $"PcapDrop+={dDrop} | " +
-                    $"IfDrop+={dIfDrop} | " +
-                    $"Enq+={dEnq} | " +
-                    $"Deq+={dDeq} | " +
-                    $"QueueCount={_queue.Count} | " +
-                    $"QueueOwnDrop+={dQdrop} | " +
-                    $"WorkerErr+={dWerr} | " +
-                    $"CallbackErr+={dCerr} | " +
-                    $"WS_MB={wsMb} | " +
-                    $"Private_MB={privateMb} | " +
-                    $"Managed_MB={managedMb} | " +
-                    $"LossSource={lossSource}");
-            }
-
-            _lastHeartbeatUtc = DateTime.UtcNow;
+            _lastReceived = recv;
+            _lastDropped = drop;
+            _lastInterfaceDropped = ifDrop;
+            _lastEnqueued = enq;
+            _lastDequeued = deq;
+            _lastQueueFullDrops = qdrop;
+            _lastWorkerErrors = werr;
+            _lastCallbackErrors = cerr;
+            return;
         }
+
+        var proc = System.Diagnostics.Process.GetCurrentProcess();
+
+        long wsMb = proc.WorkingSet64 / (1024 * 1024);
+        long privateMb = proc.PrivateMemorySize64 / (1024 * 1024);
+        long managedMb = GC.GetTotalMemory(false) / (1024 * 1024);
+
+        Console.WriteLine(
+            $"{DateTime.Now}  DELTA | " +
+            $"Recv+={dRecv} | " +
+            $"PcapDrop+={dDrop} | " +
+            $"IfDrop+={dIfDrop} | " +
+            $"Enq+={dEnq} | " +
+            $"Deq+={dDeq} | " +
+            $"QueueCount={_queue.Count} | " +
+            $"QueueOwnDrop+={dQdrop} | " +
+            $"WorkerErr+={dWerr} | " +
+            $"CallbackErr+={dCerr} | " +
+            $"WS_MB={wsMb} | " +
+            $"Private_MB={privateMb} | " +
+            $"Managed_MB={managedMb} | " +
+            $"LossSource={lossSource}");
+
+        _lastHeartbeatUtc = DateTime.UtcNow;
 
         try
         {

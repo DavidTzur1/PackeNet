@@ -9,7 +9,12 @@ namespace PacketDotNet.SMS
 {
     public static class SmsPipeline
     {
+        // Keep the IMSI allow-list behavior
         private static HashSet<string> _filterImsis = new(StringComparer.Ordinal);
+
+        // New: IMSI -> MSISDN mapping
+        private static Dictionary<string, string> _imsiToMsisdn = new(StringComparer.Ordinal);
+
         private static readonly object _filterReloadLock = new();
 
         private static string _filterFilePath;
@@ -48,11 +53,51 @@ namespace PacketDotNet.SMS
                 _filterWatcher.Renamed += OnFilterFileChanged;
                 _filterWatcher.EnableRaisingEvents = true;
 
-                Console.WriteLine($"IMSI hot reload watching: {_filterFilePath}");
+                SmsLog.Info($"IMSI hot reload watching: {_filterFilePath}");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Failed to start IMSI hot reload: {ex.Message}");
+                SmsLog.Error($"Failed to start IMSI hot reload: {ex.Message}");
+            }
+        }
+
+        public static void LoadSubscribers(string path)
+        {
+            try
+            {
+                _filterFilePath = Path.GetFullPath(path);
+
+                LoadImsiFilterNow();
+
+                string directory = Path.GetDirectoryName(_filterFilePath);
+                string fileName = Path.GetFileName(_filterFilePath);
+
+                if (string.IsNullOrWhiteSpace(directory))
+                    directory = AppContext.BaseDirectory;
+
+                _filterWatcher?.Dispose();
+
+                _filterWatcher = new FileSystemWatcher(directory, fileName)
+                {
+                    NotifyFilter =
+                        NotifyFilters.FileName |
+                        NotifyFilters.LastWrite |
+                        NotifyFilters.CreationTime |
+                        NotifyFilters.Size
+                };
+
+                _reloadDebounceTimer ??= new Timer(_ => SafeReloadFromTimer(), null, Timeout.Infinite, Timeout.Infinite);
+
+                _filterWatcher.Changed += OnFilterFileChanged;
+                _filterWatcher.Created += OnFilterFileChanged;
+                _filterWatcher.Renamed += OnFilterFileChanged;
+                _filterWatcher.EnableRaisingEvents = true;
+
+                SmsLog.Info($"IMSI hot reload watching: {_filterFilePath}");
+            }
+            catch (Exception ex)
+            {
+                SmsLog.Error($"Failed to start IMSI hot reload: {ex.Message}");
             }
         }
 
@@ -97,20 +142,27 @@ namespace PacketDotNet.SMS
         {
             lock (_filterReloadLock)
             {
-                var newSet = ReadImsiFilterFileWithRetry(_filterFilePath);
-                if (newSet == null)
+                var parsed = ReadImsiFilterFileWithRetry(_filterFilePath);
+                if (parsed == null)
                     return;
 
-                Interlocked.Exchange(ref _filterImsis, newSet);
+                Interlocked.Exchange(ref _filterImsis, parsed.AllowSet);
+                Interlocked.Exchange(ref _imsiToMsisdn, parsed.Map);
 
-                Console.WriteLine($"IMSI filter reloaded | Count={newSet.Count}");
+                SmsLog.Info($"IMSI filter reloaded | Count={parsed.AllowSet.Count} | MappedMsisdn={parsed.Map.Count}");
             }
         }
 
-        private static HashSet<string> ReadImsiFilterFileWithRetry(string path)
+        private sealed class ImsiFilterData
+        {
+            public HashSet<string> AllowSet { get; set; } = new(StringComparer.Ordinal);
+            public Dictionary<string, string> Map { get; set; } = new(StringComparer.Ordinal);
+        }
+
+        private static ImsiFilterData ReadImsiFilterFileWithRetry(string path)
         {
             if (string.IsNullOrWhiteSpace(path))
-                return new HashSet<string>(StringComparer.Ordinal);
+                return new ImsiFilterData();
 
             for (int attempt = 1; attempt <= 5; attempt++)
             {
@@ -118,18 +170,63 @@ namespace PacketDotNet.SMS
                 {
                     if (!File.Exists(path))
                     {
-                        Console.WriteLine($"IMSI file not found: {path}");
-                        return new HashSet<string>(StringComparer.Ordinal);
+                        SmsLog.Warn($"IMSI file not found: {path}");
+                        return new ImsiFilterData();
                     }
 
                     var lines = File.ReadAllLines(path);
 
-                    return new HashSet<string>(
-                        lines
-                            .Select(x => x.Trim())
-                            .Where(x => !string.IsNullOrWhiteSpace(x))
-                            .Where(x => !x.StartsWith("#")),
-                        StringComparer.Ordinal);
+                    var allowSet = new HashSet<string>(StringComparer.Ordinal);
+                    var map = new Dictionary<string, string>(StringComparer.Ordinal);
+
+                    foreach (var raw in lines)
+                    {
+                        var line = raw?.Trim();
+                        if (string.IsNullOrWhiteSpace(line))
+                            continue;
+
+                        if (line.StartsWith("#"))
+                            continue;
+
+                        // Supported formats:
+                        // IMSI
+                        // IMSI=MSISDN
+                        // IMSI,MSISDN
+                        string imsi;
+                        string msisdn = null;
+
+                        int eq = line.IndexOf('=');
+                        int comma = line.IndexOf(',');
+
+                        if (eq > 0)
+                        {
+                            imsi = line.Substring(0, eq).Trim();
+                            msisdn = line.Substring(eq + 1).Trim();
+                        }
+                        else if (comma > 0)
+                        {
+                            imsi = line.Substring(0, comma).Trim();
+                            msisdn = line.Substring(comma + 1).Trim();
+                        }
+                        else
+                        {
+                            imsi = line.Trim();
+                        }
+
+                        if (string.IsNullOrWhiteSpace(imsi))
+                            continue;
+
+                        allowSet.Add(imsi);
+
+                        if (!string.IsNullOrWhiteSpace(msisdn))
+                            map[imsi] = msisdn;
+                    }
+
+                    return new ImsiFilterData
+                    {
+                        AllowSet = allowSet,
+                        Map = map
+                    };
                 }
                 catch (IOException)
                 {
@@ -141,12 +238,12 @@ namespace PacketDotNet.SMS
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Failed to read IMSI file: {ex.Message}");
+                    SmsLog.Error($"Failed to read IMSI file: {ex.Message}");
                     return null;
                 }
             }
 
-            Console.WriteLine("Failed to reload IMSI file after retries");
+            SmsLog.Warn("Failed to reload IMSI file after retries");
             return null;
         }
 
@@ -202,9 +299,8 @@ namespace PacketDotNet.SMS
                     // ACK / RESULT / ERROR path
                     if (tcapInfo.HasReturnResult || tcapInfo.HasReturnError)
                     {
-                        var ackInfo = TcapCorrelator.Find(tcapInfo.Otid, tcapInfo.Dtid);
-
-                        bool printedAck = false;
+                        string ackMatchSource;
+                        var ackInfo = TcapCorrelator.FindWithSource(tcapInfo.Otid, tcapInfo.Dtid, out ackMatchSource);
 
                         if (ackInfo != null &&
                             !string.IsNullOrWhiteSpace(ackInfo.Text) &&
@@ -217,7 +313,7 @@ namespace PacketDotNet.SMS
                             else
                                 result = "OK";
 
-                            Console.WriteLine(
+                            SmsLog.Info(
                                 $"MAP-ACK-MT | " +
                                 $"Result={result} | " +
                                 $"ErrorCode={SafeErrorCode(tcapInfo.ReturnErrorCode)} | " +
@@ -232,11 +328,34 @@ namespace PacketDotNet.SMS
                                 $"Time={Safe(ackInfo.Timestamp)} | " +
                                 $"Text={Safe(ackInfo.Text)}");
 
-                            printedAck = true;
-                        }
+                            PublishMapAckSoap(tcapInfo, ackInfo);
 
-                        //if (ackInfo != null)
-                        //    TcapCorrelator.Remove(ackInfo);
+                            SmsLog.Warn(
+                                $"ACK-DEBUG | " +
+                                $"MatchSource={ackMatchSource} | " +
+                                $"ACK-OTID={Safe(tcapInfo.Otid)} | " +
+                                $"ACK-DTID={Safe(tcapInfo.Dtid)} | " +
+                                $"Stored-OTID={Safe(ackInfo.Otid)} | " +
+                                $"Stored-DTID={Safe(ackInfo.Dtid)} | " +
+                                $"Stored-Time={Safe(ackInfo.Timestamp)} | " +
+                                $"IMSI={Safe(ackInfo.DestinationImsi)} | " +
+                                $"From={Safe(ackInfo.From)} | " +
+                                $"TextLen={GetTextLength(ackInfo.Text)}");
+
+                            if (!string.IsNullOrWhiteSpace(ackInfo.Timestamp))
+                            {
+                                SmsLog.Warn(
+                                    $"ACK-STORED | " +
+                                    $"MatchSource={ackMatchSource} | " +
+                                    $"Stored-Time={Safe(ackInfo.Timestamp)} | " +
+                                    $"Stored-OTID={Safe(ackInfo.Otid)} | " +
+                                    $"Stored-DTID={Safe(ackInfo.Dtid)} | " +
+                                    $"TotalParts={ackInfo.TotalParts} | " +
+                                    $"PartNumber={ackInfo.PartNumber} | " +
+                                    $"IMSI={Safe(ackInfo.DestinationImsi)} | " +
+                                    $"TextPreview={Preview(ackInfo.Text, 50)}");
+                            }
+                        }
 
                         if (ackInfo != null)
                         {
@@ -277,21 +396,39 @@ namespace PacketDotNet.SMS
                     // Single-part MT: print immediately
                     if (sms.TotalParts <= 1)
                     {
-                        //Console.WriteLine(
-                        //    $"MAP-MT | " +
-                        //    $"OTID={Safe(tcapInfo.Otid)} | " +
-                        //    $"DTID={Safe(tcapInfo.Dtid)} | " +
-                        //    $"Op={(tcapInfo.OperationCode >= 0 ? tcapInfo.OperationCode.ToString("X2") : "-")} | " +
-                        //    $"From={Safe(sms.Sender)} | " +
-                        //    $"To={Safe(sms.Receiver)} | " +
-                        //    $"IMSI={Safe(resolvedImsi)} | " +
-                        //    $"Part=- | " +
-                        //    $"Time={Safe(sms.Timestamp)} | " +
-                        //    $"Text={Safe(sms.Text)}");
+                        SmsLog.Info(
+                            $"MAP-MT | " +
+                            $"OTID={Safe(tcapInfo.Otid)} | " +
+                            $"DTID={Safe(tcapInfo.Dtid)} | " +
+                            $"Op={(tcapInfo.OperationCode >= 0 ? tcapInfo.OperationCode.ToString("X2") : "-")} | " +
+                            $"From={Safe(sms.Sender)} | " +
+                            $"To={Safe(sms.Receiver)} | " +
+                            $"IMSI={Safe(resolvedImsi)} | " +
+                            $"Part=- | " +
+                            $"Time={Safe(sms.Timestamp)} | " +
+                            $"Text={Safe(sms.Text)}");
+
+                       // PublishMapMtSoap(tcapInfo, sms, resolvedImsi);
                         continue;
                     }
 
-                    // Multipart MT: print only when full text is ready
+                    if (sms.TotalParts >= 5 && GetTextLength(sms.Text) <= 40)
+                    {
+                        SmsLog.Warn(
+                            $"MP-SUSPECT-PART | " +
+                            $"OTID={Safe(tcapInfo.Otid)} | " +
+                            $"DTID={Safe(tcapInfo.Dtid)} | " +
+                            $"From={Safe(sms.Sender)} | " +
+                            $"To={Safe(sms.Receiver)} | " +
+                            $"IMSI={Safe(resolvedImsi)} | " +
+                            $"Ref={sms.ReferenceNumber} | " +
+                            $"Part={sms.PartNumber}/{sms.TotalParts} | " +
+                            $"HasUdh={(sms.HasUdh ? 1 : 0)} | " +
+                            $"Dcs=0x{sms.Dcs:X2} | " +
+                            $"TextLen={GetTextLength(sms.Text)} | " +
+                            $"TextPreview={Preview(sms.Text, 50)}");
+                    }
+
                     string fullText = SmsReassembler.AddPart(sms, resolvedImsi);
                     bool becameFullNow = !string.IsNullOrWhiteSpace(fullText);
 
@@ -304,9 +441,27 @@ namespace PacketDotNet.SMS
 
                         resolvedImsi = ResolveImsiForSms(tcapInfo, map);
 
+                        if (sms.TotalParts >= 5 && GetTextLength(sms.Text) <= 40)
+                        {
+                            SmsLog.Warn(
+                                $"MP-SUSPECT-FULL | " +
+                                $"OTID={Safe(tcapInfo.Otid)} | " +
+                                $"DTID={Safe(tcapInfo.Dtid)} | " +
+                                $"Op={(tcapInfo.OperationCode >= 0 ? tcapInfo.OperationCode.ToString("X2") : "-")} | " +
+                                $"From={Safe(sms.Sender)} | " +
+                                $"To={Safe(sms.Receiver)} | " +
+                                $"IMSI={Safe(resolvedImsi)} | " +
+                                $"Ref={sms.ReferenceNumber} | " +
+                                $"Part=FULL {sms.TotalParts}/{sms.TotalParts} | " +
+                                $"HasUdh={(sms.HasUdh ? 1 : 0)} | " +
+                                $"Dcs=0x{sms.Dcs:X2} | " +
+                                $"TextLen={GetTextLength(sms.Text)} | " +
+                                $"TextPreview={Preview(sms.Text, 80)}");
+                        }
+
                         if (ShouldPrintForImsi(resolvedImsi))
                         {
-                            Console.WriteLine(
+                            SmsLog.Info(
                                 $"MAP-MT | " +
                                 $"OTID={Safe(tcapInfo.Otid)} | " +
                                 $"DTID={Safe(tcapInfo.Dtid)} | " +
@@ -317,6 +472,8 @@ namespace PacketDotNet.SMS
                                 $"Part=FULL {sms.TotalParts}/{sms.TotalParts} | " +
                                 $"Time={Safe(sms.Timestamp)} | " +
                                 $"Text={Safe(sms.Text)}");
+
+                            PublishMapMtSoap(tcapInfo, sms, resolvedImsi);
                         }
                     }
                 }
@@ -324,6 +481,86 @@ namespace PacketDotNet.SMS
                 {
                 }
             }
+        }
+
+        private static void PublishMapMtSoap(TcapInfo tcapInfo, SmsMessage sms, string resolvedImsi)
+        {
+            try
+            {
+                string destMsisdn = ResolveMsisdnForImsi(resolvedImsi);
+
+                var evt = new SmsSoapEvent
+                {
+                    EventType = "MAP-MT",
+                    Orig = Safe(sms?.Sender),
+                    Dest = Safe(destMsisdn),
+                    OrigSMSCGT = "1",
+                    TimeStamp = Safe(sms?.Timestamp),
+                    //Dcs = sms != null ? sms.Dcs.ToString("X2") : "",
+                    //Udh = sms != null && sms.HasUdh ? "1" : "",
+                    Dcs = "UCS2",
+                    Udh = "1;1;1",
+                    MessageContent = Safe(sms?.Text),
+
+                    Otid = Safe(tcapInfo?.Otid),
+                    Dtid = Safe(tcapInfo?.Dtid),
+                    Op = tcapInfo != null && tcapInfo.OperationCode >= 0 ? tcapInfo.OperationCode.ToString("X2") : "-",
+                    Imsi = Safe(resolvedImsi)
+                };
+
+                SmsHttpBridge.Publish(evt);
+            }
+            catch
+            {
+            }
+        }
+
+        private static void PublishMapAckSoap(TcapInfo tcapInfo, TcapSmsInfo ackInfo)
+        {
+            try
+            {
+                string destMsisdn = ResolveMsisdnForImsi(ackInfo?.DestinationImsi);
+
+                var evt = new SmsSoapEvent
+                {
+                    EventType = "MAP-ACK-MT",
+                    Orig = Safe(ackInfo?.From),
+                    Dest = Safe(destMsisdn),
+                    OrigSMSCGT = "1",
+                    TimeStamp = Safe(ackInfo?.Timestamp),
+                    Dcs = "UCS2",
+                    Udh = "1;1;1",
+                    MessageContent = Safe(ackInfo?.Text),
+
+                    Otid = Safe(tcapInfo?.Otid),
+                    Dtid = Safe(tcapInfo?.Dtid),
+                    Op = ackInfo != null && ackInfo.OperationCode >= 0 ? ackInfo.OperationCode.ToString("X2") : "-",
+                    Imsi = Safe(ackInfo?.DestinationImsi)
+                };
+
+                SmsHttpBridge.Publish(evt);
+            }
+            catch
+            {
+            }
+        }
+
+        private static string ResolveMsisdnForImsi(string imsi)
+        {
+            if (string.IsNullOrWhiteSpace(imsi))
+                return null;
+
+            var currentMap = _imsiToMsisdn;
+            if (currentMap == null || currentMap.Count == 0)
+                return null;
+
+            if (currentMap.TryGetValue(imsi.Trim(), out var msisdn) &&
+                !string.IsNullOrWhiteSpace(msisdn))
+            {
+                return msisdn.Trim();
+            }
+
+            return null;
         }
 
         private static bool ShouldPrintForImsi(string imsi)
@@ -403,12 +640,29 @@ namespace PacketDotNet.SMS
             return value >= 0 ? value.ToString() : "NONE";
         }
 
+        private static int GetTextLength(string text)
+        {
+            return string.IsNullOrEmpty(text) ? 0 : text.Length;
+        }
+
+        private static string Preview(string text, int maxLen)
+        {
+            if (string.IsNullOrEmpty(text))
+                return "-";
+
+            text = text.Replace("\r", " ").Replace("\n", " ");
+
+            if (text.Length <= maxLen)
+                return text;
+
+            return text.Substring(0, maxLen) + "...";
+        }
+
         private static bool IsBinaryMessage(SmsMessage sms)
         {
             if (sms == null)
                 return false;
 
-            // app-port addressed / OTA-like messages are usually binary
             if (sms.DestPort >= 0 || sms.SrcPort >= 0)
                 return true;
 
