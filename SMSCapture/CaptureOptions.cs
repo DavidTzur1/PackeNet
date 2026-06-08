@@ -2,6 +2,7 @@
 {
     public class CaptureOptions
     {
+        //
         public int DeviceIndex { get; set; } = 1;
 
         public bool UseFileMode { get; set; }
