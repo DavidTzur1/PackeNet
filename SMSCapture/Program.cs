@@ -18,7 +18,7 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 builder.Services.AddSingleton<DapperContext>();
-builder.Services.AddScoped<IRepository, Repository>();
+builder.Services.AddSingleton<IRepository, Repository>();
 
 // <-- add this line
 builder.Services.AddControllers();

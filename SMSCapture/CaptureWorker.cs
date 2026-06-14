@@ -20,6 +20,7 @@ namespace SMSCapture
     {
         private readonly ILogger<CaptureWorker> _logger;
         private readonly CaptureOptions _options;
+        private readonly IRepository _repository;
 
         private ICaptureDevice? _device;
         private Thread? _statsThread;
@@ -65,10 +66,9 @@ namespace SMSCapture
             public int Length;
         }
 
-        public CaptureWorker(
-            ILogger<CaptureWorker> logger,
-            IOptions<CaptureOptions> options)
+        public CaptureWorker(IRepository repository, ILogger<CaptureWorker> logger,IOptions<CaptureOptions> options)
         {
+            _repository = repository;
             _logger = logger;
             _options = options.Value;
 
@@ -90,6 +90,8 @@ namespace SMSCapture
             try
             {
                 StartWorker();
+
+                var subs = await _repository.GetSubscribers();
 
                 PacketDotNet.SMS.SmsPipeline.StartImsiFilterHotReload(_options.ImsiFilePath);
 
