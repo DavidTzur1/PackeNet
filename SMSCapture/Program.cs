@@ -17,6 +17,12 @@ builder.Host.UseSerilog();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
+builder.Services.AddSingleton<DapperContext>();
+builder.Services.AddScoped<IRepository, Repository>();
+
+// <-- add this line
+builder.Services.AddControllers();
+
 builder.Services.Configure<CaptureOptions>(
     builder.Configuration.GetSection("Capture"));
 
@@ -33,15 +39,25 @@ builder.Services.AddHostedService<SmsSoapSender>();
 
 var app = builder.Build();
 
-app.UseSwagger();
-app.UseSwaggerUI();
-
-app.MapGet("/", () => Results.Ok("SMS capture worker is running"));
-
-app.MapGet("/health", () => Results.Ok(new
+if (app.Environment.IsDevelopment())
 {
-    Status = "OK",
-    TimeUtc = DateTime.UtcNow
-}));
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
+//app.UseAuthorization();
+
+app.MapControllers();
+
+//app.UseSwagger();
+//app.UseSwaggerUI();
+
+//app.MapGet("/", () => Results.Ok("SMS capture worker is running"));
+
+//app.MapGet("/health", () => Results.Ok(new
+//{
+//    Status = "OK",
+//    TimeUtc = DateTime.UtcNow
+//}));
 
 app.Run();
