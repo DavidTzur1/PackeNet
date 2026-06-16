@@ -9,6 +9,7 @@ using System;
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Threading;
@@ -93,7 +94,13 @@ namespace SMSCapture
 
                 var subs = await _repository.GetSubscribers();
 
-                PacketDotNet.SMS.SmsPipeline.StartImsiFilterHotReload(_options.ImsiFilePath);
+                var dict = (subs ?? Enumerable.Empty<SubscriberModel>())
+                    .Where(s => !string.IsNullOrWhiteSpace(s.IMSI))
+                    .ToDictionary(
+                        s => s.IMSI.Trim(),
+                        s => string.IsNullOrWhiteSpace(s.MSISDN) ? "" : s.MSISDN.Trim());
+
+                PacketDotNet.SMS.SmsPipeline.LoadImsiFilterFromDictionary(dict);
 
                 if (_options.UseFileMode)
                     RunFileMode();

@@ -565,13 +565,17 @@ namespace PacketDotNet.SMS
 
         private static bool ShouldPrintForImsi(string imsi)
         {
+           
             if (string.IsNullOrWhiteSpace(imsi))
                 return false;
+
+            //425010791885475
+           
 
             var current = _filterImsis;
 
             if (current == null || current.Count == 0)
-                return true;
+                return false;
 
             return current.Contains(imsi.Trim());
         }
@@ -670,6 +674,44 @@ namespace PacketDotNet.SMS
                 return true;
 
             return false;
+        }
+
+        // Add this public helper to SmsPipeline (place near other public helpers, e.g. after StopImsiFilterHotReload)
+        public static void LoadImsiFilterFromDictionary(IDictionary<string, string> rows)
+        {
+            try
+            {
+                var allowSet = new HashSet<string>(StringComparer.Ordinal);
+                var map = new Dictionary<string, string>(StringComparer.Ordinal);
+
+                if (rows != null)
+                {
+                    foreach (var kv in rows)
+                    {
+                        var imsi = kv.Key?.Trim();
+                        if (string.IsNullOrWhiteSpace(imsi))
+                            continue;
+
+                        allowSet.Add(imsi);
+
+                        var msisdn = kv.Value?.Trim();
+                        if (!string.IsNullOrWhiteSpace(msisdn))
+                            map[imsi] = msisdn;
+                    }
+                }
+
+                lock (_filterReloadLock)
+                {
+                    Interlocked.Exchange(ref _filterImsis, allowSet);
+                    Interlocked.Exchange(ref _imsiToMsisdn, map);
+                }
+
+                SmsLog.Info($"IMSI filter loaded from dictionary | Count={allowSet.Count} | MappedMsisdn={map.Count}");
+            }
+            catch (Exception ex)
+            {
+                SmsLog.Error($"Failed to load IMSI filter from dictionary: {ex.Message}");
+            }
         }
     }
 }

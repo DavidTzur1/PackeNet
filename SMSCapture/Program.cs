@@ -52,12 +52,12 @@ app.MapControllers();
 //app.UseSwagger();
 //app.UseSwaggerUI();
 
-//app.MapGet("/", () => Results.Ok("SMS capture worker is running"));
+app.MapGet("/", () => Results.Ok("SMS capture worker is running"));
 
-//app.MapGet("/health", () => Results.Ok(new
-//{
-//    Status = "OK",
-//    TimeUtc = DateTime.UtcNow
-//}));
+app.MapGet("/health", () => Results.Ok(new
+{
+    Status = "OK",
+    TimeUtc = DateTime.UtcNow
+}));
 
 app.Run();

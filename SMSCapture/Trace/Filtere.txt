@@ -1,0 +1,1 @@
+﻿gsm_sms.tp-oa == "Clalit"
