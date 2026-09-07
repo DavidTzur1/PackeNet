@@ -49,6 +49,17 @@ namespace SMSCapture.Controllers
             try
             {
                 await _repository.AddOrDelProvisioning(req.MSISDN, req.ServiceCode.ToString(), req.Action, req.IMSI);
+
+                var subs = await _repository.GetSubscribers();
+
+                var dict = (subs ?? Enumerable.Empty<SubscriberModel>())
+                    .Where(s => !string.IsNullOrWhiteSpace(s.IMSI))
+                    .ToDictionary(
+                        s => s.IMSI.Trim(),
+                        s => string.IsNullOrWhiteSpace(s.MSISDN) ? "" : s.MSISDN.Trim());
+
+                PacketDotNet.SMS.SmsPipeline.LoadImsiFilterFromDictionary(dict);
+
                 return Ok(res);
             }
             catch (Exception ex)
