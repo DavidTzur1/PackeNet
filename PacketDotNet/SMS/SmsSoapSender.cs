@@ -97,7 +97,7 @@ namespace PacketDotNet.SMS
         }
 
 
-
+        //
 
 
         private static string ConstructSoapRequest(string orig, string dest, string origSMSCGT, string timeStamp, string dcs, string udh, string content)
