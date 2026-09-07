@@ -1,10 +1,12 @@
 ﻿using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -16,12 +18,14 @@ namespace PacketDotNet.SMS
     {
         private readonly ILogger<SmsSoapSender> _logger;
         private readonly HttpClient _httpClient;
+        private readonly HttpClient _httpClientDialer;
         private readonly Channel<SmsSoapEvent> _channel;
 
         public SmsSoapSender(ILogger<SmsSoapSender> logger, IHttpClientFactory httpClientFactory)
         {
             _logger = logger;
             _httpClient = httpClientFactory.CreateClient("SmsSoap");
+            _httpClientDialer = httpClientFactory.CreateClient("Dialer");
 
             _channel = Channel.CreateBounded<SmsSoapEvent>(new BoundedChannelOptions(20000)
             {
@@ -44,29 +48,44 @@ namespace PacketDotNet.SMS
                 {
                     string soapString = ConstructSoapRequest( evt.Orig,evt.Dest, evt.OrigSMSCGT,evt.TimeStamp,evt.Dcs,evt.Udh,evt.MessageContent);
 
-                    using var content = new StringContent(soapString, Encoding.UTF8, "text/xml");
+                    var obj = new
+                    {
+                        text = evt.MessageContent
+                    };
+                   
+
+                    var content = new StringContent(JsonSerializer.Serialize(obj),Encoding.UTF8,"application/json");
+
+
                     using var response = await _httpClient.PostAsync("", content, stoppingToken);
 
                     if (!response.IsSuccessStatusCode)
                     {
                         _logger.LogWarning(
-                            "SOAP send failed | EventType={EventType} | Status={StatusCode} | OTID={OTID} | DTID={DTID}",
+                            "TTS send failed | EventType={EventType} | Status={StatusCode} | OTID={OTID} | DTID={DTID}",
                             evt.EventType, (int)response.StatusCode, evt.Otid, evt.Dtid);
                         continue;
                     }
 
-                    await using var soapResponse = await response.Content.ReadAsStreamAsync(stoppingToken);
-                    var soap = XElement.Load(soapResponse);
+                    var path = await response.Content.ReadAsStringAsync(stoppingToken);
+                    _logger.LogInformation("TTS send OK | EventType={EventType} |Path={path} | OTID={OTID} | DTID={DTID}",evt.EventType, path, evt.Otid, evt.Dtid);
 
-                    XNamespace ns = "TTSMedClient";
+                    var uri = await CallDialerAsync(evt.Orig,evt.Dest,"801",path,stoppingToken);
+                    var response1 = await _httpClientDialer.GetAsync(uri, stoppingToken);
 
-                    var resultNode = soap.Descendants(ns + "SendMsgResult").FirstOrDefault();
-                    var resultId = resultNode?.Element(ns + "ResultId")?.Value ?? "-";
-                    var resultDesc = resultNode?.Element(ns + "ResultDesc")?.Value ?? "-";
+                    if (!response1.IsSuccessStatusCode)
+                    {
+                        _logger.LogWarning(
+                            "Dialer send failed | EventType={EventType} | Status={StatusCode} | OTID={OTID} | DTID={DTID}",
+                            evt.EventType, (int)response.StatusCode, evt.Otid, evt.Dtid);
+                        continue;
+                    }
 
                     _logger.LogInformation(
-                        "SOAP send ok | EventType={EventType} | ResultId={ResultId} | ResultDesc={ResultDesc} | OTID={OTID} | DTID={DTID}",
-                        evt.EventType, resultId, resultDesc, evt.Otid, evt.Dtid);
+                            "Dialer send OK | EventType={EventType} | Status={StatusCode} | OTID={OTID} | DTID={DTID}",
+                            evt.EventType, (int)response.StatusCode, evt.Otid, evt.Dtid);
+
+
                 }
                 catch (Exception ex)
                 {
@@ -109,6 +128,39 @@ namespace PacketDotNet.SMS
             );
 
             return doc.ToString(SaveOptions.DisableFormatting);
+        }
+
+
+        private async Task<string> CallDialerAsync(string aNumber,string bNumber, string prefix, string wavFilePath, CancellationToken stoppingToken)
+        {
+            var parameters = new Dictionary<string, string>
+            {
+                ["Method"] = "LoadAndEnterScenario",
+                ["ScenFileName"] = @"D:\IVRData\MakeCallDialer\Scenarios\MakeCallDialerRequest.phn",
+                ["ScenName"] = "MakeCallDialerRequest",
+                ["ANumber"] = aNumber,
+                ["BNumber"] = bNumber,
+                ["BNumberPrefix"] = prefix,
+                ["WavFilePath"] = wavFilePath,
+                ["NextAttempt"] = "05/28/2025 12:00",
+                ["DepositVMStatus"] = "2",
+                ["RetryString"] = "1;1;2;2;12",
+                ["Template"] = "2",
+                ["OtherInfo"] = "801"
+            };
+
+            string queryString = string.Join("&",
+                parameters.Select(x =>
+                    $"{Uri.EscapeDataString(x.Key)}={Uri.EscapeDataString(x.Value)}"));
+
+            string url =
+                "PhnCfger/sysasp/OuchIvrPartner.asp?" + queryString;
+
+            //string response = await _httpClientDialer.GetStringAsync(
+            //    url,
+            //    stoppingToken);
+
+            return url;
         }
 
     }

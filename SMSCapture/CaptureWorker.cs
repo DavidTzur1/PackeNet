@@ -513,9 +513,9 @@ namespace SMSCapture
             long privateMb = proc.PrivateMemorySize64 / (1024 * 1024);
             long managedMb = GC.GetTotalMemory(false) / (1024 * 1024);
 
-            _logger.LogInformation(
-                "DELTA | Recv+={Recv} | PcapDrop+={PcapDrop} | IfDrop+={IfDrop} | Enq+={Enq} | Deq+={Deq} | QueueCount={QueueCount} | QueueOwnDrop+={QueueOwnDrop} | WorkerErr+={WorkerErr} | CallbackErr+={CallbackErr} | WS_MB={WsMb} | Private_MB={PrivateMb} | Managed_MB={ManagedMb} | LossSource={LossSource}",
-                dRecv, dDrop, dIfDrop, dEnq, dDeq, _queue.Count, dQdrop, dWerr, dCerr, wsMb, privateMb, managedMb, lossSource);
+            //_logger.LogInformation(
+            //    "DELTA | Recv+={Recv} | PcapDrop+={PcapDrop} | IfDrop+={IfDrop} | Enq+={Enq} | Deq+={Deq} | QueueCount={QueueCount} | QueueOwnDrop+={QueueOwnDrop} | WorkerErr+={WorkerErr} | CallbackErr+={CallbackErr} | WS_MB={WsMb} | Private_MB={PrivateMb} | Managed_MB={ManagedMb} | LossSource={LossSource}",
+            //    dRecv, dDrop, dIfDrop, dEnq, dDeq, _queue.Count, dQdrop, dWerr, dCerr, wsMb, privateMb, managedMb, lossSource);
 
             _lastHeartbeatUtc = DateTime.UtcNow;
 

@@ -26,10 +26,17 @@ builder.Services.AddControllers();
 builder.Services.Configure<CaptureOptions>(
     builder.Configuration.GetSection("Capture"));
 
-// SOAP HTTP client
+// TTS HTTP client
 builder.Services.AddHttpClient("SmsSoap", client =>
 {
     client.BaseAddress = new Uri(builder.Configuration["Soap:BaseUrl"]!);
+    client.Timeout = TimeSpan.FromSeconds(15);
+});
+
+// Dialer HTTP client
+builder.Services.AddHttpClient("Dialer", client =>
+{
+    client.BaseAddress = new Uri(builder.Configuration["Dialer:BaseUrl"]!);
     client.Timeout = TimeSpan.FromSeconds(15);
 });
 
